@@ -738,7 +738,8 @@ class TorrentEntry(object):
                     "remaster.id = torrent_entry_remaster.remaster_id "
                     "where torrent_entry_remaster.torrent_entry_id = ?",
                     (id,))]
-            row = api.db.cursor().execute(
+            c = api.db.cursor()
+            c.execute(
                 "select "
                 "torrent_entry.id as id, "
                 "torrent_entry.checked as checked, "
@@ -766,7 +767,8 @@ class TorrentEntry(object):
                 "left outer join tracker_stats "
                 "on tracker_stats.id = torrent_entry.id "
                 "where torrent_entry.id = ?",
-                (id,)).fetchone()
+                (id,))
+            row = c.fetchone()
             if not row:
                 return None
             row = dict(zip((n for n, t in c.getdescription()), row))
@@ -1422,11 +1424,18 @@ class API(object):
         response = method(url, **kwargs)
         response.raise_for_status()
 
-        if len(response.text) < 100:
-            log_text = response.text
+        # Autodetecting encoding takes forever, ensure we don't implicitly do
+        # this
+        if response.encoding:
+            if len(response.text) < 100:
+                log().debug("%s -> %s", url, response.text)
+            else:
+                log().debug("%s -> %.97s...", url, response.text)
         else:
-            log_text = "%.97s..." % response.text
-        log().debug("%s -> %s", url, log_text)
+            if len(response.content) < 100:
+                log().debug("%s -> %r", url, response.content)
+            else:
+                log().debug("%s -> %.97r...", url, response.content)
 
         return response
 
