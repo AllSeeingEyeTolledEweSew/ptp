@@ -1453,6 +1453,7 @@ class API(object):
                 method, path, leave_tokens=leave_tokens,
                 block_on_token=block_on_token, consume_token=consume_token,
                 **kwargs)
+            self.cookiejar.save()
             u = urllib.parse.urlparse(r.url)
             if u.path != "/login.php":
                 return r
