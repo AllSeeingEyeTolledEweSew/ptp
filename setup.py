@@ -27,9 +27,9 @@ setup(
         "feedparser>=5.2.1",
     ],
     entry_points={
-        #"console_scripts": [
-        #    "btn_scrape = btn.cli.scrape:main",
-        #],
+        "console_scripts": [
+            "ptp_scrape = ptp.cli.scrape:main",
+        ],
     },
     #classifiers=[
     #    "Development Status :: 5 - Production/Stable",
