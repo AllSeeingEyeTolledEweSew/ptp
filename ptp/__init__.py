@@ -632,6 +632,9 @@ class TorrentEntry(object):
                 "create index if not exists torrent_entry_on_info_hash "
                 "on torrent_entry (info_hash)")
             c.execute(
+                "create index if not exists torrent_entry_on_movie_id "
+                "on torrent_entry (movie_id)")
+            c.execute(
                 "create table if not exists codec ("
                 "id integer primary key, "
                 "name text not null)")
@@ -892,7 +895,7 @@ class TorrentEntry(object):
                     "where torrent_entry_id = ?", (self.id,)))
             remaster_ids_to_delete = all_remaster_ids - remaster_ids
             if remaster_ids_to_delete:
-                self.api.db.cursor().execute(
+                self.api.db.cursor().executemany(
                     "delete from torrent_entry_remaster where "
                     "torrent_entry_id = ? and remaster_id = ?",
                     [(self.id, id) for id in remaster_ids_to_delete])
