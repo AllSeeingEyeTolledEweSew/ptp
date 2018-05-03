@@ -1050,8 +1050,28 @@ class TorrentEntry(object):
                 self.api.session.get, "/torrents.php",
                 params=dict(action="download", authkey=self.api.authkey,
                     torrent_pass=self.api.passkey, id=self.id))
+            if self._check_response_indicates_deletion(response):
+                return None
             self._got_raw_torrent(response.content)
             return self._raw_torrent
+
+    def _check_response_indicates_deletion(self, response):
+        u = urllib.parse.urlparse(response.url)
+        if u.path == "/log.php" and "was deleted" in response.text:
+            self._delete()
+            return True
+        return False
+
+    def _delete(self, changestamp=None):
+        with self.api.begin():
+            if changestamp is None:
+                changestamp = self.api.get_changestamp()
+            self.api.db.cursor().execute(
+                "update torrent_entry set deleted = 1, updated_at = ? "
+                "where id = ? and not deleted",
+                (changestamp, self.id))
+            Movie._maybe_delete(
+                self.api, self.movie.id, changestamp=changestamp)
 
     @property
     def file_info_cached(self):
