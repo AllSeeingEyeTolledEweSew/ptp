@@ -36,7 +36,7 @@ def set_int(api, key, value):
         api.set_global(key, str(value))
 
 
-def apply_contiguous_results_locked(api, offset, sr, changestamp=None):
+def apply_contiguous_results_locked(api, sr, is_end, changestamp=None):
     """Marks torrent entries as deleted, appropriate to a search result.
 
     When we receive a search result for getTorrents with no filters, the result
@@ -66,18 +66,21 @@ def apply_contiguous_results_locked(api, offset, sr, changestamp=None):
             determined to represent the last page of results.
     """
     assert all(len(m.torrents) == 1 for m in sr.movies)
-    entries = [m.torrents[0] for m in sr.movies]
-    entries = sorted(entries, key=lambda te: (-te.time, -te.id))
-    is_end = offset + len(entries) >= sr.results
+    entries_by_time = sorted(
+        (te for mr in sr.movies for te in mr.torrents),
+        key=lambda te: (te.time, te.id))
 
-    if entries:
-        newest = entries[0]
-        oldest = entries[-1]
+    if entries_by_time:
+        c = api.db.cursor()
+        newest = entries_by_time[-1]
+        oldest = entries_by_time[0]
         api.db.cursor().execute(
-            "create temp table ids (id integer not null primary key)")
+            "create temp table if not exists ids "
+            "(id integer not null primary key)")
+        api.db.cursor().execute("delete from ids")
         api.db.cursor().executemany(
             "insert into temp.ids (id) values (?)",
-            [(entry.id,) for entry in entries])
+            [(entry.id,) for entry in entries_by_time])
 
         torrent_entries_to_delete = set()
         movies_to_check = set()
@@ -96,8 +99,6 @@ def apply_contiguous_results_locked(api, offset, sr, changestamp=None):
             torrent_entries_to_delete.add(id)
             movies_to_check.add(movie_id)
 
-        api.db.cursor().execute("drop table temp.ids")
-
         if torrent_entries_to_delete:
             log().debug(
                 "Deleting torrent entries: %s",
@@ -113,7 +114,7 @@ def apply_contiguous_results_locked(api, offset, sr, changestamp=None):
             ptp.Movie._maybe_delete(
                 api, *list(movies_to_check), changestamp=changestamp)
 
-    return entries, is_end
+    return entries_by_time
 
 
 def apply_whole_movie_results_locked(api, offset, sr, changestamp=None):
@@ -267,7 +268,7 @@ class MetadataTipScraper(object):
 
     KEY_LAST = "tip_last_scraped"
     KEY_LAST_TS = "tip_last_scraped_ts"
-    KEY_OFFSET = "tip_scrape_offset"
+    KEY_PAGE = "tip_scrape_page"
     KEY_NEWEST = "tip_scrape_newest"
     KEY_NEWEST_TS = "tip_scrape_newest_ts"
 
@@ -283,63 +284,92 @@ class MetadataTipScraper(object):
         self.once = once
         self.thread = None
 
-    def update_scrape_results_locked(self, offset, sr):
-        apply_whole_movie_results_locked(self.api, offset, sr)
+    def update_scrape_results_locked(self, sr, is_end):
+        entries_by_time = apply_contiguous_results_locked(self.api, sr, is_end)
 
         last_scraped_id = get_int(self.api, self.KEY_LAST)
         last_scraped_ts = get_int(self.api, self.KEY_LAST_TS)
         newest_id = get_int(self.api, self.KEY_NEWEST)
         newest_ts = get_int(self.api, self.KEY_NEWEST_TS)
 
-        newest_entries = [
-            sorted(mr.torrents, key=lambda te: (te.time, te.id))[-1]
-            for mr in sr.movies]
+        if entries_by_time:
+            oldest_in_page = entries_by_time[0]
+            newest_in_page = entries_by_time[-1]
+        else:
+            oldest_in_page = None
+            newest_in_page = None
 
-        if newest_ts is None or (newest_entries and (
-                (newest_entries[0].time, newest_entries[0].id) >=
+        if newest_ts is None or (newest_in_page and (
+                (newest_in_page.time, newest_in_page.id) >=
                 (newest_ts, newest_id))):
-            newest_id = newest_entries[0].id
-            newest_ts = newest_entries[0].time
+            newest_id = newest_in_page.id
+            newest_ts = newest_in_page.time
 
-        is_end = offset + len(sr.movies) >= sr.results
         done = False
         if is_end:
             log().info("We reached the oldest torrent entry.")
             done = True
         elif last_scraped_ts is not None and (
-                (newest_entries[-1].time, newest_entries[-1].id) <=
+                (oldest_in_page.time, oldest_in_page.id) <=
                 (last_scraped_ts, last_scraped_id)):
             log().info("Caught up. Current as of %s.", newest_id)
             done = True
-        offset += len(sr.movies)
 
         if done:
             set_int(self.api, self.KEY_LAST, newest_id)
             set_int(self.api, self.KEY_LAST_TS, newest_ts)
-            set_int(self.api, self.KEY_OFFSET, None)
             set_int(self.api, self.KEY_NEWEST, None)
             set_int(self.api, self.KEY_NEWEST_TS, None)
         else:
-            set_int(self.api, self.KEY_OFFSET, offset)
             set_int(self.api, self.KEY_NEWEST, newest_id)
             set_int(self.api, self.KEY_NEWEST_TS, newest_ts)
 
         return done
 
     def scrape_step(self):
+        # Our strategy is to order torrents by upload time ascending, and visit
+        # them in reverse order. The reason for this awkward traversal is
+        # that in almost all available orderings, a given torrent may move
+        # either forward or backward in the list, if older torrents are deleted
+        # or new ones are added; this means a torrent may jump between pages of
+        # results during our traversal, and we may never see it. However with
+        # upload time / ascending ordering, a torrent may only ever move to an
+        # earlier index (when an older torrent is deleted). By traversing
+        # backward, we can ensure we visit every torrent at least once.
+
         with self.api.db:
-            offset = get_int(self.api, self.KEY_OFFSET)
-            last_scraped = get_int(self.api, self.KEY_LAST)
+            page = get_int(self.api, self.KEY_PAGE)
 
-        if offset is None:
-            offset = 0
+        # If we're just starting, we don't know which page represents the end
+        # of the list. We peek at the first page of results ordered by upload
+        # time descending, and use the "total results" field to figure out
+        # where the end of the list is.
 
-        log().info("Scraping at offset %s", offset)
+        peek = (page is None)
 
-        sr = self.api.browse(order_by="timenoreseed", page=(offset // 50) + 1)
+        if peek:
+            log().info("Peeking most recent torrents")
+            sr = self.api.browse(order_by="timenoreseed", grouping=0)
+            is_end = False
+        else:
+            log().info("Scraping page %s", page)
+            sr = self.api.browse(
+                order_by="timenoreseed", grouping=0, page=page,
+                order_way="asc")
+            is_end = (page <= 1)
 
         with self.api.begin():
-            return self.update_scrape_results_locked(offset, sr)
+            done = self.update_scrape_results_locked(sr, is_end)
+            if done:
+                set_int(self.api, self.KEY_PAGE, None)
+            else:
+                if peek:
+                    page = (sr.results // 50) + 1
+                else:
+                    page -= 1
+                set_int(self.api, self.KEY_PAGE, page)
+
+        return done
 
     def run(self):
         try:
