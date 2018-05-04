@@ -1058,8 +1058,8 @@ class TorrentEntry(object):
                 return self._raw_torrent
             log().debug("Fetching raw torrent for %s", repr(self))
             response = self.api._call(
-                self.api.session.get, "/torrents.php",
-                params=dict(action="download", authkey=self.api.authkey,
+                "get", "/torrents.php", params=dict(
+                    action="download", authkey=self.api.authkey,
                     torrent_pass=self.api.passkey, id=self.id))
             if self._check_response_indicates_deletion(response):
                 return None
@@ -1395,8 +1395,7 @@ class API(object):
 
     def login(self):
         r = self._call(
-            self.session.post, "/ajax.php", params=dict(action="login"),
-            data=dict(
+            "post", "/ajax.php", params=dict(action="login"), data=dict(
                 username=self.username, password=self.password,
                 passkey=self.passkey, keeplogged=1, login="Login"))
         if r.json()["Result"] != "Ok":
@@ -1414,7 +1413,7 @@ class API(object):
         Returns:
             The `requests.response`.
         """
-        return self._call(self.session.get, path, params=params)
+        return self._call("get", path, params=params)
 
     def _call(self, method, path, leave_tokens=None, block_on_token=None,
               consume_token=None, **kwargs):
@@ -1455,7 +1454,7 @@ class API(object):
                     raise WouldBlock()
 
         url = self._mk_url(self.SCHEME, self.HOST, path)
-        response = method(url, **kwargs)
+        response = getattr(self.session, method)(url, **kwargs)
         response.raise_for_status()
 
         # Autodetecting encoding takes forever, ensure we don't implicitly do
@@ -1605,9 +1604,8 @@ class API(object):
         """
         kwargs["json"] = "noredirect"
         bj = self._call_authed(
-            self.session.get, "/torrents.php", params=kwargs,
-                leave_tokens=leave_tokens, block_on_token=block_on_token,
-                consume_token=consume_token).json()
+            "get", "/torrents.php", params=kwargs, leave_tokens=leave_tokens,
+            block_on_token=block_on_token, consume_token=consume_token).json()
         bj = _unescape(bj)
         return bj
 
