@@ -471,13 +471,11 @@ class SiteLogScraper(object):
         ids_to_delete = []
         prev_ts = None
         for ts, id in self.parse_deleted_ts_ids(html):
-            log().debug("cur = (%s, %s); last = (%s, %s)", ts, id, last_ts,
-                    last_id)
             if (ts, id) == (last_ts, last_id) or (
                     last_ts is not None and ts < last_ts):
                 log().info(
                     "Caught up. Latest entry: %s deleted at %s",
-                    last_id, last_ts)
+                    newest_id, newest_ts)
                 done = True
                 break
             if newest_ts is None or ts > newest_ts or (
