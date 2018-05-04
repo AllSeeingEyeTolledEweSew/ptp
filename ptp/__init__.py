@@ -1565,19 +1565,15 @@ class API(object):
             An integer changestamps, unique and larger than the result of any
                 previous call to `get_changestamp()` for this database.
         """
-        with self.db:
-            # Workaround so savepoint behaves like begin immediate
-            self.db.cursor().execute(
-                "insert or ignore into user.global (name, value) "
-                "values (?, ?)",
-                ("changestamp", 0))
-            try:
-                changestamp = int(self.get_global("changestamp") or 0)
-            except ValueError:
-                changestamp = 0
-            changestamp += 1
-            self.set_global("changestamp", changestamp)
-            return changestamp
+        assert not self.db.getautocommit()
+        r = self.db.cursor().execute(
+            "select max(updated_at) from ("
+            "select max(updated_at) updated_at from torrent_entry union all "
+            "select max(updated_at) updated_at from movie)").fetchone()
+        if r:
+            return r[0] + 1
+        else:
+            return 0
 
     def browse_json(self, leave_tokens=None, block_on_token=None,
                     consume_token=None, **kwargs):
