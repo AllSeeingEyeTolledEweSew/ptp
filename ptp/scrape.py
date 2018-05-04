@@ -4,13 +4,16 @@
 """Several long-lived-daemon-style classes to scrape BTN and update the cache.
 """
 
-import feedparser
+import datetime
 import logging
-import os
+import re
 import Queue
 import threading
 import time
-from urllib import parse as urllib_parse
+import urllib.parse
+
+import bs4
+import dateutil.parser
 
 import ptp
 
@@ -366,6 +369,188 @@ class MetadataTipScraper(object):
                         break
                     else:
                         time.sleep(60)
+        finally:
+            log().debug("shutting down")
+
+    def start(self):
+        if self.thread:
+            return
+        t = threading.Thread(
+            name="metadata-tip-scraper", target=self.run, daemon=True)
+        t.start()
+        self.thread = t
+
+    def join(self):
+        if self.thread:
+            self.thread.join()
+
+
+class SiteLogScraper(object):
+
+    KEY_LAST = "sitelog_last_scraped"
+    KEY_LAST_TS = "sitelog_last_scraped_ts"
+    KEY_PAGE = "sitelog_scrape_page"
+    KEY_NEWEST = "sitelog_scrape_newest"
+    KEY_NEWEST_TS = "sitelog_scrape_newest_ts"
+
+    DELETED_MSG_REGEX = re.compile(
+        r"Torrent\s+(?P<torrent_id>\d+)\s+\(.*\)\s+was\s+deleted\s.*", re.I)
+
+    def __init__(self, api):
+        if api.username is None:
+            raise ValueError("username not configured")
+        if api.password is None:
+            raise ValueError("password not configured")
+        if api.passkey is None:
+            raise ValueError("passkey not configured")
+
+        self.api = api
+        self.thread = None
+
+    def parse_deleted_ts_ids(self, html):
+        table = html.table
+        for tr in table.find_all("tr"):
+            cells = tr.find_all("td")
+            if not cells:
+                continue
+            if cells[0].text == "Nothing found!":
+                return
+            assert len(cells) == 2, cells
+            ts_cell, msg_cell = cells
+
+            timestamp = ts_cell.span.attrs["title"]
+            timestamp = dateutil.parser.parse(timestamp)
+            timestamp = timestamp.replace(tzinfo=datetime.timezone.utc)
+            timestamp = int(timestamp.timestamp())
+
+            message = msg_cell.span.text
+            message = message.strip()
+            m = self.DELETED_MSG_REGEX.match(message)
+            if not m:
+                continue
+            id = int(m.group("torrent_id"))
+
+            yield (timestamp, id)
+
+    def scrape_step(self):
+        with self.api.db:
+            last_id = get_int(self.api, self.KEY_LAST)
+            last_ts = get_int(self.api, self.KEY_LAST_TS)
+            page = get_int(self.api, self.KEY_PAGE)
+            newest_id = get_int(self.api, self.KEY_NEWEST)
+            newest_ts = get_int(self.api, self.KEY_NEWEST_TS)
+
+            if page is None:
+                page = 1
+            if newest_id is None and newest_ts is None:
+                newest_id = last_id
+                newest_ts = last_ts
+
+        log().info("Scraping site log at page %s", page)
+
+        r = self.api._get("/log.php", params=dict(search="deleted", page=page))
+
+        html = bs4.BeautifulSoup(r.text, "html.parser")
+
+        last_page = None
+        for a in html.find_all("a"):
+            href = a.attrs.get("href")
+            if not href:
+                continue
+            u = urllib.parse.urlparse(href)
+            if u.path not in ("/log.php", "log.php"):
+                continue
+            qs = urllib.parse.parse_qs(u.query)
+            if not qs.get("page"):
+                continue
+            link_page = int(qs.get("page")[0])
+            if last_page is None or link_page > last_page:
+                last_page = link_page
+        assert last_page is not None, "Couldn't determine last page"
+
+        ids_to_delete = []
+        prev_ts = None
+        for ts, id in self.parse_deleted_ts_ids(html):
+            log().debug("cur = (%s, %s); last = (%s, %s)", ts, id, last_ts,
+                    last_id)
+            if (ts, id) == (last_ts, last_id) or (
+                    last_ts is not None and ts < last_ts):
+                log().info(
+                    "Caught up. Latest entry: %s deleted at %s",
+                    last_id, last_ts)
+                done = True
+                break
+            if newest_ts is None or ts > newest_ts or (
+                    ts != prev_ts and ts == newest_ts):
+                newest_ts = ts
+                newest_id = id
+            prev_ts = ts
+            ids_to_delete.append(id)
+        else:
+            done = False
+
+        with self.api.begin():
+            if ids_to_delete:
+                filtered_ids_to_delete = []
+                for id, in self.api.db.cursor().execute(
+                        "select id from torrent_entry where id in (%s) "
+                        "and not deleted" % ",".join("?" * len(ids_to_delete)),
+                        ids_to_delete):
+                    filtered_ids_to_delete.append(id)
+                ids_to_delete = filtered_ids_to_delete
+            if ids_to_delete:
+                movies_to_check = set()
+                for movie_id, in self.api.db.cursor().execute(
+                        "select movie_id from torrent_entry "
+                        "where id in (%s) and not deleted" %
+                        ",".join("?" * len(ids_to_delete)),
+                        ids_to_delete):
+                    movies_to_check.add(movie_id)
+                log().debug(
+                    "Deleting torrent entries: %s", ids_to_delete)
+                changestamp = self.api.get_changestamp()
+                self.api.db.cursor().executemany(
+                    "update torrent_entry set deleted = 1, updated_at = ? "
+                    "where id = ? and not deleted",
+                    [(changestamp, id) for id in ids_to_delete])
+                ptp.Movie._maybe_delete(self.api, *movies_to_check)
+
+            if page >= last_page and not done:
+                log().info(
+                    "Site log truncated earlier than our last sync. "
+                    "Will reset tip scraper to ensure we get everything.")
+                set_int(self.api, MetadataTipScraper.KEY_LAST, None)
+                set_int(self.api, MetadataTipScraper.KEY_LAST_TS, None)
+                set_int(self.api, MetadataTipScraper.KEY_PAGE, None)
+                set_int(self.api, MetadataTipScraper.KEY_NEWEST, None)
+                set_int(self.api, MetadataTipScraper.KEY_NEWEST_TS, None)
+                done = True
+
+            if done:
+                set_int(self.api, self.KEY_LAST, newest_id)
+                set_int(self.api, self.KEY_LAST_TS, newest_ts)
+                set_int(self.api, self.KEY_PAGE, None)
+                set_int(self.api, self.KEY_NEWEST, None)
+                set_int(self.api, self.KEY_NEWEST_TS, None)
+            else:
+                set_int(self.api, self.KEY_NEWEST, newest_id)
+                set_int(self.api, self.KEY_NEWEST_TS, newest_ts)
+                set_int(self.api, self.KEY_PAGE, page + 1)
+
+        return done
+
+    def run(self):
+        try:
+            while True:
+                try:
+                    done = self.scrape_step()
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    log().exception("during scrape")
+                    done = True
+                if done:
+                    time.sleep(60)
         finally:
             log().debug("shutting down")
 

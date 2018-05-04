@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--metadata_tip", action="store_true")
     parser.add_argument("--torrent_files", action="store_true")
     parser.add_argument("--snatchlist", action="store_true")
+    parser.add_argument("--site_log", action="store_true")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--once", action="store_true")
     ptp.add_arguments(parser, create_group=True)
@@ -41,6 +42,7 @@ def main():
         args.metadata_tip = True
         args.torrent_files = True
         args.snatchlist = True
+        args.site_log = True
 
     api = ptp.API.from_args(parser, args)
 
@@ -56,6 +58,8 @@ def main():
         scrapers.append(ptp_scrape.TorrentFileScraper(api))
     if args.snatchlist:
         scrapers.append(ptp_scrape.SnatchlistScraper(api, once=args.once))
+    if args.site_log:
+        scrapers.append(ptp_scrape.SiteLogScraper(api))
 
     if not scrapers:
         log().fatal("Nothing to do.")

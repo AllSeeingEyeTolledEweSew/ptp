@@ -1401,7 +1401,7 @@ class API(object):
         if r.json()["Result"] != "Ok":
             raise LoginError(r.text)
 
-    def _get(self, path, **params):
+    def _get(self, path, **kwargs):
         """A helper function to make a normal HTTP GET call to the PTP site.
 
         This will consume a token from `token_bucket`, blocking if necessary.
@@ -1413,7 +1413,7 @@ class API(object):
         Returns:
             The `requests.response`.
         """
-        return self._call("get", path, params=params)
+        return self._call("get", path, **kwargs)
 
     def _call(self, method, path, leave_tokens=None, block_on_token=None,
               consume_token=None, **kwargs):

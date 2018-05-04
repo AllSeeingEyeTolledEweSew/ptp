@@ -20,11 +20,12 @@ setup(
     packages=find_packages(),
     use_2to3=True,
     install_requires=[
+        "beautifulsoup4>=4.6.0",
+        "python-dateutil>=2.7.2",
         "better-bencode>=0.2.1",
         "PyYAML>=3.12",
         "requests>=2.12.3",
         "tbucket>=1.0.0",
-        "feedparser>=5.2.1",
     ],
     entry_points={
         "console_scripts": [
