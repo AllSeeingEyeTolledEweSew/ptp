@@ -556,7 +556,7 @@ class SiteLogScraper(object):
         if self.thread:
             return
         t = threading.Thread(
-            name="metadata-tip-scraper", target=self.run, daemon=True)
+            name="site-log-scraper", target=self.run, daemon=True)
         t.start()
         self.thread = t
 
