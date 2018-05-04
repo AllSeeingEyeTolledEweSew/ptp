@@ -1457,18 +1457,10 @@ class API(object):
         response = getattr(self.session, method)(url, **kwargs)
         response.raise_for_status()
 
-        # Autodetecting encoding takes forever, ensure we don't implicitly do
-        # this
-        if response.encoding:
-            if len(response.text) < 100:
-                log().debug("%s -> %s", url, response.text)
-            else:
-                log().debug("%s -> %.97s...", url, response.text)
+        if len(response.content) < 100:
+            log().debug("-> %r", response.content)
         else:
-            if len(response.content) < 100:
-                log().debug("%s -> %r", url, response.content)
-            else:
-                log().debug("%s -> %.97r...", url, response.content)
+            log().debug("-> %.97r...", response.content)
 
         return response
 
