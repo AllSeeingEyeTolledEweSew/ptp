@@ -1334,6 +1334,18 @@ class API(object):
             c.execute(
                 "create unique index if not exists user.global_name "
                 "on global (name)")
+            c.execute(
+                "create table if not exists user.snatchlist ("
+                "id integer primary key, "
+                "uploaded integer not null, "
+                "downloaded integer not null, "
+                "downloaded_fraction float not null, "
+                "ratio float not null, "
+                "last_action integer not null, "
+                "seeding tinyint not null, "
+                "seed_time_left integer not null, "
+                "seed_time integer not null, "
+                "hnr tinyint not null)")
         c.execute("pragma journal_mode=wal").fetchall()
         return db
 

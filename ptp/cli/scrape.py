@@ -57,7 +57,7 @@ def main():
             log().fatal("--torrent_files --once isn't implemented")
         scrapers.append(ptp_scrape.TorrentFileScraper(api))
     if args.snatchlist:
-        scrapers.append(ptp_scrape.SnatchlistScraper(api, once=args.once))
+        scrapers.append(ptp_scrape.SnatchlistScraper(api))
     if args.site_log:
         scrapers.append(ptp_scrape.SiteLogScraper(api))
 

@@ -670,13 +670,34 @@ class SnatchlistScraper(object):
     Attributes:
         api: A `ptp.API` instance.
         target_tokens: A number of tokens to leave as leftover in
-            `api.api_token_bucket`.
+            `api.token_bucket`.
     """
 
     KEY_PAGE = "snatchlist_scrape_next_page"
-    KEY_RESULTS = "snatchlist_scrape_last_results"
 
     DEFAULT_TARGET_TOKENS = 0
+
+    _HUMAN_BYTES_UNITS = {
+        "B": 2**0,
+        "KiB": 2**10,
+        "MiB": 2**20,
+        "GiB": 2**30,
+        "TiB": 2**40,
+    }
+
+    _HUMAN_DURATION_UNITS = {
+        "s": 1,
+        "seconds": 1,
+        "m": 60,
+        "minutes": 60,
+        "h": 60*60,
+        "hours": 60*60,
+        "d": 24*60*60,
+        "days": 24*60*60,
+        "w": 7*24*60*60,
+        "mo": 30*24*60*60,
+        "y": 365*24*60*60,
+    }
 
     def __init__(self, api, target_tokens=None):
         if target_tokens is None:
@@ -692,72 +713,159 @@ class SnatchlistScraper(object):
         self.api = api
         self.target_tokens = target_tokens
 
-        self.tokens = None
         self.thread = None
 
-    def update_step(self):
-        success, _, _ = self.api.api_token_bucket.try_consume(
-            1, leave=self.target_tokens)
-        if not success:
-            return True
+    def parse_human_bytes(self, text):
+        m = re.match(r"(?P<amount>[\d\.]+) (?P<unit>.*)", text)
+        assert m, text
+        amount = float(m.group("amount"))
+        unit = m.group("unit")
+        unit = self._HUMAN_BYTES_UNITS.get(unit, 1)
+        amount = int(amount * unit)
+        return amount
 
-        with self.api.begin():
-            page = get_int(self.api, self.KEY_PAGE) or 1
-            next_page = page + 1
-            results = get_int(self.api, self.KEY_RESULTS)
-            if results is not None:
-                last_page = (results // MOVIES_PER_PAGE) + 1
-                if next_page > last_page:
-                    next_page = 1
-            set_int(self.api, self.KEY_PAGE, next_page)
+    def parse_human_duration(self, text):
+        found_any = False
+        total = 0
+        for m in re.finditer(r"(?P<amount>\d+)(?P<unit>[a-z]+)", text, re.I):
+            found_any = True
+            amount = int(m.group("amount"))
+            unit = m.group("unit")
+            unit = self._HUMAN_DURATION_UNITS.get(unit, 0)
+            amount = amount * unit
+            total += amount
+        assert found_any, text
+        return total
 
-        log().info(
-            "Trying update at offset %s, %s tokens left", offset,
-            self.api.token_bucket.peek()[0])
+    def parse_percent(self, text):
+        m = re.match(r"(?P<percent>\d+)%", text)
+        assert m, text
+        return int(m.group("percent")) / 100
 
-        try:
-            sr = self.api.browse(
-                results=self.BLOCK_SIZE, offset=offset, consume_token=False)
-        except ptp.WouldBlock:
-            log().info("Out of tokens, quitting")
-            return True
-        except ptp.APIError as e:
-            if e.code == e.CODE_CALL_LIMIT_EXCEEDED:
-                log().debug("Call limit exceeded, quitting")
-                return True
+    def parse_entries(self, html):
+        table = html.find("div", id="SnatchData").table
+        for tr in table.find_all("tr"):
+            cells = tr.find_all("td")
+            if not cells:
+                continue
+            if cells[0].text == "Nothing found!":
+                return
+            assert len(cells) == 11, cells
+            (torrent_id, uploaded, downloaded, ratio, _, _, last_action,
+             seeding, seed_time_left, seed_time, hnr) = cells
+
+            u = urllib.parse.urlparse(torrent_id.a.attrs["href"])
+            qs = urllib.parse.parse_qs(u.query)
+            torrent_id = int(qs["torrentid"][0])
+
+            uploaded = self.parse_human_bytes(uploaded.text)
+
+            m = re.match(
+                r"(?P<downloaded>.*) \((?P<downloaded_pct>.*%)\)",
+                downloaded.text)
+            assert m, downloaded.text
+
+            downloaded = self.parse_human_bytes(m.group("downloaded"))
+            downloaded_fraction = self.parse_percent(m.group("downloaded_pct"))
+
+            if downloaded:
+                ratio = ratio.text.replace(",", "")
+                ratio = float(ratio)
             else:
-                raise
+                ratio = float("inf")
+
+            last_action = dateutil.parser.parse(last_action.text).replace(
+                tzinfo=datetime.timezone.utc).timestamp()
+            last_action = int(last_action)
+
+            seeding = (seeding.text == "Yes")
+
+            if seed_time_left.text == "Complete":
+                seed_time_left = 0
+            elif seed_time_left.text == "48 hours":
+                seed_time_left = 48*60*60
+            else:
+                seed_time_left = self.parse_human_duration(seed_time_left.text)
+
+            if seed_time.text == "Never":
+                seed_time = 0
+            else:
+                seed_time = self.parse_human_duration(seed_time.text)
+
+            hnr = (hnr.text == "Yes")
+
+            yield dict(
+                id=torrent_id, uploaded=uploaded, downloaded=downloaded,
+                downloaded_fraction=downloaded_fraction, ratio=ratio,
+                last_action=last_action, seeding=seeding,
+                seed_time_left=seed_time_left, seed_time=seed_time, hnr=hnr)
+
+    def scrape_step(self):
+        with self.api.db:
+            page = get_int(self.api, self.KEY_PAGE)
+
+            if page is None:
+                page = 1
+
+        log().info("Scraping snatchlist at page %s", page)
+
+        r = self.api._get("/snatchlist.php", params=dict(full=1, page=page))
+
+        html = bs4.BeautifulSoup(r.content, "html.parser")
+
+        last_page = None
+        for a in html.find_all("a"):
+            href = a.attrs.get("href")
+            if not href:
+                continue
+            u = urllib.parse.urlparse(href)
+            if u.path not in ("/snatchlist.php", "snatchlist.php"):
+                continue
+            qs = urllib.parse.parse_qs(u.query)
+            if not qs.get("page"):
+                continue
+            link_page = int(qs.get("page")[0])
+            if last_page is None or link_page > last_page:
+                last_page = link_page
+        assert last_page is not None, "Couldn't determine last page"
+
+        entries = list(self.parse_entries(html))
 
         with self.api.begin():
-            set_int(self.api, self.KEY_RESULTS, sr.results)
+            page += 1
+            if page >= last_page:
+                page = 1
 
-        return False
+            set_int(self.api, self.KEY_PAGE, page)
+
+            self.api.db.cursor().executemany(
+                "insert or replace into user.snatchlist ("
+                "id, uploaded, downloaded, downloaded_fraction, ratio, "
+                "last_action, seeding, seed_time_left, seed_time, hnr) "
+                "values (:id, :uploaded, :downloaded, :downloaded_fraction, "
+                ":ratio, :last_action, :seeding, :seed_time_left, :seed_time, "
+                ":hnr)",
+                entries)
 
     def run(self):
         try:
             while True:
                 try:
-                    done = self.update_step()
+                    done = self.scrape_step()
                 except:
                     log().exception("during update")
                     done = True
                 if done:
-                    if self.once:
-                        break
-                    else:
-                        time.sleep(60)
+                    time.sleep(60)
         finally:
             log().debug("shutting down")
 
     def start(self):
-        if self.threads:
+        if self.thread:
             return
-        for i in range(self.num_threads):
-            t = threading.Thread(
-                name="snatchlist-scraper-%d" % i, target=self.run, daemon=True)
-            t.start()
-            self.threads.append(t)
+        self.thread = threading.Thread(
+            name="snatchlist-scraper", target=self.run, daemon=True)
+        self.thread.start()
 
     def join(self):
-        for t in self.threads:
-            t.join()
+        self.thread.join()
