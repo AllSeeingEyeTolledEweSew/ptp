@@ -46,8 +46,7 @@ def main():
 
     scrapers = []
     if args.metadata:
-        scrapers.append(
-            ptp_scrape.MetadataScraper(api, once=args.once))
+        scrapers.append(ptp_scrape.MetadataScraper(api))
     if args.metadata_tip:
         scrapers.append(
             ptp_scrape.MetadataTipScraper(api, once=args.once))

@@ -15,6 +15,13 @@ from urllib import parse as urllib_parse
 import ptp
 
 
+MOVIES_PER_PAGE = 50
+
+
+def page_for_index(idx):
+    return (idx // MOVIES_PER_PAGE) + 1
+
+
 def log():
     """Gets a module-level logger."""
     return logging.getLogger(__name__)
@@ -117,7 +124,7 @@ def apply_contiguous_results_locked(api, sr, is_end, changestamp=None):
     return entries_by_time
 
 
-def apply_whole_movie_results_locked(api, offset, sr, changestamp=None):
+def apply_whole_movie_results_locked(api, sr, is_end, changestamp=None):
     torrent_entries_to_delete = set()
     for mr in sr.movies:
         for id, in api.db.cursor().execute(
@@ -147,27 +154,23 @@ class MetadataScraper(object):
     This daemon calls getTorrents with no filters and varying offset. The
     intent is to discover deleted torrents, and freshen metadata.
 
-    This daemon will consume as many tokens from `api.api_token_bucket` as
+    This daemon will consume as many tokens from `api.token_bucket` as
     possible, up to a configured limit. The intent of this is to defer token
     use to `MetadataTipScraper`.
 
     Attributes:
         api: A `ptp.API` instance.
         target_tokens: A number of tokens to leave as leftover in
-            `api.api_token_bucket`.
+            `api.token_bucket`.
     """
 
-    KEY_OFFSET = "scrape_next_offset"
+    KEY_PAGE = "scrape_next_page"
     KEY_RESULTS = "scrape_last_results"
-
-    BLOCK_SIZE = 1000
 
     DEFAULT_TARGET_TOKENS = 0
     DEFAULT_NUM_THREADS = 10
 
-    def __init__(self, api, target_tokens=None, num_threads=None, once=False):
-        if num_threads is None:
-            num_threads = self.DEFAULT_THREADS
+    def __init__(self, api, target_tokens=None):
         if target_tokens is None:
             target_tokens = self.DEFAULT_TARGET_TOKENS
 
@@ -180,57 +183,40 @@ class MetadataScraper(object):
 
         self.api = api
         self.target_tokens = target_tokens
-        self.num_threads = num_threads
-        self.once = once
 
-        self.lock = threading.RLock()
-        self.tokens = None
-        self.threads = []
+        self.thread = None
 
     def update_step(self):
-        if self.once:
-            tokens, _, _ = self.api.api_token_bucket.peek()
-            with self.lock:
-                if self.tokens is not None and tokens > self.tokens:
-                    log().info("Tokens refilled, quitting")
-                    return True
-                self.tokens = tokens
-
-        target_tokens = self.target_tokens
-
-        success, _, _, _ = self.api.api_token_bucket.try_consume(
-            1, leave=target_tokens)
+        success, _, _ = self.api.token_bucket.try_consume(
+            1, leave=self.target_tokens)
         if not success:
             return True
 
         with self.api.begin():
-            offset = get_int(self.api, self.KEY_OFFSET) or 0
+            page = get_int(self.api, self.KEY_PAGE) or 1
+            next_page = page + 1
             results = get_int(self.api, self.KEY_RESULTS)
-            next_offset = offset + self.BLOCK_SIZE - 1
-            if results and next_offset > results:
-                next_offset = 0
-            set_int(self.api, self.KEY_OFFSET, next_offset)
+            if results is not None:
+                last_page = page_for_index(results - 1)
+                if next_page > last_page:
+                    next_page = 1
+            set_int(self.api, self.KEY_PAGE, next_page)
 
         log().info(
-            "Trying update at offset %s, %s tokens left", offset,
-            self.api.api_token_bucket.peek()[0])
+            "Trying update at page %s, %s tokens left", page,
+            self.api.token_bucket.peek()[0])
 
         try:
-            sr = self.api.getTorrents(
-                results=2**31, offset=offset, consume_token=False)
+            sr = self.api.browse(page=page, consume_token=False)
         except ptp.WouldBlock:
             log().info("Out of tokens, quitting")
             return True
-        except ptp.APIError as e:
-            if e.code == e.CODE_CALL_LIMIT_EXCEEDED:
-                log().debug("Call limit exceeded, quitting")
-                return True
-            else:
-                raise
 
         with self.api.begin():
+            last_page = page_for_index(sr.results - 1)
+            is_end = (page >= last_page)
             set_int(self.api, self.KEY_RESULTS, sr.results)
-            apply_contiguous_results_locked(self.api, offset, sr)
+            apply_whole_movie_results_locked(self.api, sr, is_end)
 
         return False
 
@@ -243,25 +229,19 @@ class MetadataScraper(object):
                     log().exception("during update")
                     done = True
                 if done:
-                    if self.once:
-                        break
-                    else:
-                        time.sleep(60)
+                    time.sleep(60)
         finally:
             log().debug("shutting down")
 
     def start(self):
-        if self.threads:
+        if self.thread:
             return
-        for i in range(self.num_threads):
-            t = threading.Thread(
-                name="metadata-scraper-%d" % i, target=self.run, daemon=True)
-            t.start()
-            self.threads.append(t)
+        self.thread = threading.Thread(
+            name="metadata-scraper", target=self.run, daemon=True)
+        self.thread.start()
 
     def join(self):
-        for t in self.threads:
-            t.join()
+        self.thread.join()
 
 
 class MetadataTipScraper(object):
@@ -364,7 +344,7 @@ class MetadataTipScraper(object):
                 set_int(self.api, self.KEY_PAGE, None)
             else:
                 if peek:
-                    page = (sr.results // 50) + 1
+                    page = (sr.results // MOVIES_PER_PAGE) + 1
                 else:
                     page -= 1
                 set_int(self.api, self.KEY_PAGE, page)
@@ -510,17 +490,12 @@ class SnatchlistScraper(object):
             `api.api_token_bucket`.
     """
 
-    KEY_OFFSET = "snatchlist_scrape_next_offset"
+    KEY_PAGE = "snatchlist_scrape_next_page"
     KEY_RESULTS = "snatchlist_scrape_last_results"
 
-    BLOCK_SIZE = 10000
-
     DEFAULT_TARGET_TOKENS = 0
-    DEFAULT_NUM_THREADS = 10
 
-    def __init__(self, api, target_tokens=None, num_threads=None, once=False):
-        if num_threads is None:
-            num_threads = self.DEFAULT_THREADS
+    def __init__(self, api, target_tokens=None):
         if target_tokens is None:
             target_tokens = self.DEFAULT_TARGET_TOKENS
 
@@ -533,43 +508,32 @@ class SnatchlistScraper(object):
 
         self.api = api
         self.target_tokens = target_tokens
-        self.num_threads = num_threads
-        self.once = once
 
-        self.lock = threading.RLock()
         self.tokens = None
-        self.threads = []
+        self.thread = None
 
     def update_step(self):
-        if self.once:
-            tokens, _, _ = self.api.api_token_bucket.peek()
-            with self.lock:
-                if self.tokens is not None and tokens > self.tokens:
-                    log().info("Tokens refilled, quitting")
-                    return True
-                self.tokens = tokens
-
-        target_tokens = self.target_tokens
-
-        success, _, _, _ = self.api.api_token_bucket.try_consume(
-            1, leave=target_tokens)
+        success, _, _ = self.api.api_token_bucket.try_consume(
+            1, leave=self.target_tokens)
         if not success:
             return True
 
         with self.api.begin():
-            offset = get_int(self.api, self.KEY_OFFSET) or 0
+            page = get_int(self.api, self.KEY_PAGE) or 1
+            next_page = page + 1
             results = get_int(self.api, self.KEY_RESULTS)
-            next_offset = offset + self.BLOCK_SIZE
-            if results and next_offset > results:
-                next_offset = 0
-            set_int(self.api, self.KEY_OFFSET, next_offset)
+            if results is not None:
+                last_page = (results // MOVIES_PER_PAGE) + 1
+                if next_page > last_page:
+                    next_page = 1
+            set_int(self.api, self.KEY_PAGE, next_page)
 
         log().info(
             "Trying update at offset %s, %s tokens left", offset,
-            self.api.api_token_bucket.peek()[0])
+            self.api.token_bucket.peek()[0])
 
         try:
-            sr = self.api.getUserSnatchlist(
+            sr = self.api.browse(
                 results=self.BLOCK_SIZE, offset=offset, consume_token=False)
         except ptp.WouldBlock:
             log().info("Out of tokens, quitting")
