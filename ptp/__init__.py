@@ -10,6 +10,7 @@ import contextlib
 import cookielib
 import json as json_lib
 import hashlib
+import html
 import logging
 import os
 import re
@@ -62,6 +63,16 @@ TORRENT_HISTORY_FRACTION = 0.95
 def log():
     """Gets a module-level logger."""
     return logging.getLogger(__name__)
+
+
+def _unescape(j):
+    if type(j) is str:
+        return html.unescape(j)
+    if type(j) is list:
+        return [_unescape(x) for x in j]
+    if type(j) is dict:
+        return {html.unescape(k): _unescape(v) for k, v in j.items()}
+    return j
 
 
 class Movie(object):
@@ -1593,10 +1604,12 @@ class API(object):
             HTTPError: If there was an HTTP-level error.
         """
         kwargs["json"] = "noredirect"
-        return self._call_authed(
+        bj = self._call_authed(
             self.session.get, "/torrents.php", params=kwargs,
                 leave_tokens=leave_tokens, block_on_token=block_on_token,
                 consume_token=consume_token).json()
+        bj = _unescape(bj)
+        return bj
 
     def _torrent_entry_from_json(self, tj):
         """Create a TorrentEntry from parsed JSON.
