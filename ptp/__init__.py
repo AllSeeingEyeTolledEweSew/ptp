@@ -134,22 +134,15 @@ class Movie(object):
                 "on movie_director (artist_id)")
 
             c.execute(
-                "create table if not exists tag ("
-                "id integer primary key, "
-                "name text not null)")
-            c.execute(
-                "create unique index if not exists tag_name on tag (name)")
-
-            c.execute(
                 "create table if not exists movie_tag ("
-                "movie_id integer not null, "
-                "tag_id integer not null)")
+                "id integer not null, "
+                "tag text not null)")
             c.execute(
-                "create unique index if not exists movie_tag_movie_tag "
-                "on movie_tag (movie_id, tag_id)")
+                "create unique index if not exists movie_tag_id_tag "
+                "on movie_tag (id, tag)")
             c.execute(
                 "create index if not exists movie_tag_tag "
-                "on movie_tag (tag_id)")
+                "on movie_tag (tag)")
 
     @classmethod
     def _from_db(cls, api, id):
@@ -181,9 +174,7 @@ class Movie(object):
             del row[k]
         row["tags"] = [
             tag for (tag,) in api.db.cursor().execute(
-                "select tag.name from movie_tag inner join tag "
-                "on tag.id = movie_tag.tag_id "
-                "where movie_tag.movie_id = ?", (id,))]
+                "select tag from movie_tag where id = ?", (id,))]
         row["directors"] = [
             Artist._from_db(api, aid) for (aid,) in api.db.cursor().execute(
                 "select artist_id from movie_director where movie_id = ?",
@@ -257,27 +248,14 @@ class Movie(object):
             force_update = False
 
             self.api.db.cursor().executemany(
-                "insert or ignore into tag (name) values (?)",
-                [(tag,) for tag in self.tags])
-            tag_ids = set()
-            for tag in self.tags:
-                tag_id = self.api.db.cursor().execute(
-                    "select id from tag where name = ?", (tag,)).fetchone()[0]
-                tag_ids.add(tag_id)
-                self.api.db.cursor().execute(
-                    "insert or ignore into movie_tag (movie_id, tag_id) "
-                    "values (?, ?)", (self.id, tag_id))
-                if self.api.db.changes():
-                    force_update = True
-            all_tag_ids = set(
-                id for (id,) in self.api.db.cursor().execute(
-                    "select tag_id from movie_tag where movie_id = ?",
-                    (self.id,)))
-            tag_ids_to_delete = all_tag_ids - tag_ids
-            if tag_ids_to_delete:
-                self.api.db.cursor().executemany(
-                    "delete from movie_tag where movie_id = ? and tag_id = ?",
-                    [(self.id, tag_id) for tag_id in tag_ids_to_delete])
+                "insert or ignore into movie_tag (id, tag) values (?, ?)",
+                [(self.id, tag) for tag in self.tags])
+            if self.api.db.changes():
+                force_update = True
+            self.api.db.cursor().execute(
+                "delete from movie_tag where id = ? and tag not in (%s)" %
+                ",".join("?" * len(self.tags)), [self.id] + list(self.tags))
+            if self.api.db.changes():
                 force_update = True
 
             for artist in self.directors:
@@ -521,20 +499,13 @@ class Report(object):
             c = api.db.cursor()
             c.execute(
                 "create table if not exists report ("
-                "torrent_entry_id integer not null, "
+                "id integer not null, "
                 "comment text, "
                 "time integer not null, "
-                "type_id integer not null)")
+                "type text not null)")
             c.execute(
                 "create unique index if not exists report_id_time_type "
-                "on report (torrent_entry_id, time, type_id)")
-            c.execute(
-                "create table if not exists report_type ("
-                "id integer primary key, "
-                "name text not null)")
-            c.execute(
-                "create unique index if not exists report_type_name "
-                "on report_type (name)")
+                "on report (id, time, type)")
 
     def __init__(self, api, torrent_entry, comment=None, time=None, type=None):
         self.api = api
@@ -621,17 +592,17 @@ class TorrentEntry(object):
                 "create table if not exists torrent_entry ("
                 "id integer primary key, "
                 "checked tinyint not null, "
-                "codec_id integer not null, "
-                "container_id integer not null, "
+                "codec text not null, "
+                "container text not null, "
                 "golden_popcorn tinyint not null, "
                 "info_hash text, "
                 "movie_id integer not null, "
-                "quality_id integer not null, "
+                "quality text not null, "
                 "release_name text not null, "
-                "resolution_id integer not null, "
+                "resolution text not null, "
                 "scene tinyint not null, "
                 "size integer not null, "
-                "source_id integer not null, "
+                "source text not null, "
                 "time integer not null, "
                 "raw_torrent_cached tinyint not null default 0, "
                 "updated_at integer not null, "
@@ -646,59 +617,31 @@ class TorrentEntry(object):
                 "create index if not exists torrent_entry_on_movie_id "
                 "on torrent_entry (movie_id)")
             c.execute(
-                "create table if not exists codec ("
-                "id integer primary key, "
-                "name text not null)")
+                "create index if not exists torrent_entry_codec "
+                "on torrent_entry (codec)")
             c.execute(
-                "create unique index if not exists codec_name "
-                "on codec (name)")
+                "create index if not exists torrent_entry_container "
+                "on torrent_entry (container)")
             c.execute(
-                "create table if not exists container ("
-                "id integer primary key, "
-                "name text not null)")
+                "create index if not exists torrent_entry_quality "
+                "on torrent_entry (quality)")
             c.execute(
-                "create unique index if not exists container_name "
-                "on container (name)")
+                "create index if not exists torrent_entry_resolution "
+                "on torrent_entry (resolution)")
             c.execute(
-                "create table if not exists quality ("
-                "id integer primary key, "
-                "name text not null)")
-            c.execute(
-                "create unique index if not exists quality_name "
-                "on quality (name)")
-            c.execute(
-                "create table if not exists remaster ("
-                "id integer primary key, "
-                "name text not null)")
-            c.execute(
-                "create unique index if not exists remaster_name "
-                "on remaster (name)")
+                "create index if not exists torrent_entry_source "
+                "on torrent_entry (source)")
+
             c.execute(
                 "create table if not exists torrent_entry_remaster ("
-                "torrent_entry_id integer not null, "
-                "remaster_id integer not null)")
+                "id integer not null, remaster text not null)")
             c.execute(
                 "create unique index if not exists "
-                "torrent_entry_remaster_torrent_entry_remaster "
-                "on torrent_entry_remaster (torrent_entry_id, remaster_id)")
+                "torrent_entry_remaster_id_name "
+                "on torrent_entry_remaster (id, remaster)")
             c.execute(
-                "create index if not exists "
-                "torrent_entry_remaster_remaster "
-                "on torrent_entry_remaster (remaster_id)")
-            c.execute(
-                "create table if not exists resolution ("
-                "id integer primary key, "
-                "name text not null)")
-            c.execute(
-                "create unique index if not exists resolution_name "
-                "on resolution (name)")
-            c.execute(
-                "create table if not exists source ("
-                "id integer primary key, "
-                "name text not null)")
-            c.execute(
-                "create unique index if not exists source_name "
-                "on source (name)")
+                "create index if not exists torrent_entry_remaster_name "
+                "on torrent_entry_remaster (remaster)")
 
             c.execute(
                 "create table if not exists file_info ("
@@ -747,37 +690,29 @@ class TorrentEntry(object):
         with api.db:
             remasters = [
                 name for (name,) in api.db.cursor().execute(
-                    "select remaster.name from torrent_entry_remaster "
-                    "inner join remaster on "
-                    "remaster.id = torrent_entry_remaster.remaster_id "
-                    "where torrent_entry_remaster.torrent_entry_id = ?",
+                    "select remaster from torrent_entry_remaster where id = ?",
                     (id,))]
             c = api.db.cursor()
             c.execute(
                 "select "
                 "torrent_entry.id as id, "
                 "torrent_entry.checked as checked, "
-                "codec.name as codec, "
-                "container.name as container, "
+                "torrent_entry.codec as codec, "
+                "torrent_entry.container as container, "
                 "torrent_entry.golden_popcorn as golden_popcorn, "
                 "torrent_entry.info_hash as info_hash, "
                 "tracker_stats.leechers as leechers, "
-                "quality.name as quality, "
+                "torrent_entry.quality as quality, "
                 "torrent_entry.release_name as release_name, "
-                "resolution.name as resolution, "
+                "torrent_entry.resolution as resolution, "
                 "torrent_entry.scene as scene, "
                 "tracker_stats.seeders as seeders, "
                 "torrent_entry.size as size, "
                 "tracker_stats.snatched as snatched, "
-                "source.name as source, "
+                "torrent_entry.source as source, "
                 "torrent_entry.time as time, "
                 "torrent_entry.movie_id as movie_id "
                 "from torrent_entry "
-                "left outer join codec on codec.id = codec_id "
-                "left outer join container on container.id = container_id "
-                "left outer join quality on quality.id = quality_id "
-                "left outer join resolution on resolution.id = resolution_id "
-                "left outer join source on source.id = source_id "
                 "left outer join tracker_stats "
                 "on tracker_stats.id = torrent_entry.id "
                 "where torrent_entry.id = ?",
@@ -851,65 +786,19 @@ class TorrentEntry(object):
             file_info = list(FileInfo._from_tobj(self.torrent_object))
         force_update = False
         with self.api.db:
-            self.api.db.cursor().execute(
-                "insert or ignore into codec (name) values (?)", (self.codec,))
-            codec_id = self.api.db.cursor().execute(
-                "select id from codec where name = ?",
-                (self.codec,)).fetchone()[0]
-
-            self.api.db.cursor().execute(
-                "insert or ignore into container (name) values (?)",
-                (self.container,))
-            container_id = self.api.db.cursor().execute(
-                "select id from container where name = ?",
-                (self.container,)).fetchone()[0]
-
-            self.api.db.cursor().execute(
-                "insert or ignore into quality (name) values (?)",
-                (self.quality,))
-            quality_id = self.api.db.cursor().execute(
-                "select id from quality where name = ?",
-                (self.quality,)).fetchone()[0]
-
-            self.api.db.cursor().execute(
-                "insert or ignore into resolution (name) values (?)",
-                (self.resolution,))
-            resolution_id = self.api.db.cursor().execute(
-                "select id from resolution where name = ?",
-                (self.resolution,)).fetchone()[0]
-
-            self.api.db.cursor().execute(
-                "insert or ignore into source (name) values (?)",
-                (self.source,))
-            source_id = self.api.db.cursor().execute(
-                "select id from source where name = ?",
-                (self.source,)).fetchone()[0]
-
+            force_update = False
             self.api.db.cursor().executemany(
-                "insert or ignore into remaster (name) values (?)",
-                [(remaster,) for remaster in self.remasters])
-            remaster_ids = set(
-                self.api.db.cursor().execute(
-                    "select id from remaster where name = ?",
-                    (remaster,)).fetchone()[0]
-                for remaster in self.remasters)
-            for id in remaster_ids:
-                self.api.db.cursor().execute(
-                    "insert or ignore into torrent_entry_remaster "
-                    "(torrent_entry_id, remaster_id) values (?, ?)",
-                    (self.id, id))
-                if self.api.db.changes():
-                    force_update = True
-            all_remaster_ids = set(
-                id for (id,) in self.api.db.cursor().execute(
-                    "select remaster_id from torrent_entry_remaster "
-                    "where torrent_entry_id = ?", (self.id,)))
-            remaster_ids_to_delete = all_remaster_ids - remaster_ids
-            if remaster_ids_to_delete:
-                self.api.db.cursor().executemany(
-                    "delete from torrent_entry_remaster where "
-                    "torrent_entry_id = ? and remaster_id = ?",
-                    [(self.id, id) for id in remaster_ids_to_delete])
+                "insert or ignore into torrent_entry_remaster (id, remaster) "
+                "values (?, ?)",
+                [(self.id, remaster) for remaster in self.remasters])
+            if self.api.db.changes():
+                force_update = True
+            self.api.db.cursor().execute(
+                "delete from torrent_entry_remaster where id = ? "
+                "and remaster not in (%s)" %
+                ",".join("?" * len(self.remasters)),
+                [self.id] + list(self.remasters))
+            if self.api.db.changes():
                 force_update = True
 
             r = self.api.db.cursor().execute(
@@ -922,16 +811,16 @@ class TorrentEntry(object):
             self.movie.serialize(changestamp=changestamp)
             params = {
                 "checked": self.checked,
-                "codec_id": codec_id,
-                "container_id": container_id,
+                "codec": self.codec,
+                "container": self.container,
                 "golden_popcorn": self.golden_popcorn,
                 "movie_id": self.movie.id,
-                "quality_id": quality_id,
+                "quality": self.quality,
                 "release_name": self.release_name,
-                "resolution_id": resolution_id,
+                "resolution": self.resolution,
                 "scene": self.scene,
                 "size": self.size,
-                "source_id": source_id,
+                "source": self.source,
                 "time": self.time,
                 "raw_torrent_cached": self.raw_torrent_cached,
                 "deleted": 0,
