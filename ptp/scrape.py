@@ -292,7 +292,7 @@ class MetadataTipScraper(object):
         if is_end:
             log().info("We reached the oldest torrent entry.")
             done = True
-        elif last_scraped_ts is not None and (
+        elif last_scraped_ts is not None and oldest_in_page and (
                 (oldest_in_page.time, oldest_in_page.id) <=
                 (last_scraped_ts, last_scraped_id)):
             log().info("Caught up. Current as of %s.", newest_id)
